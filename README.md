@@ -55,6 +55,32 @@ folder ignores itself, so it is never committed by accident.
 - **Big projects work too.** pandas (1,411 files) scans in under 8 seconds, and its
   report opens in under one.
 
+## See what your AI agent changed
+
+After an agent has edited your code, ask what changed in the *structure*, not just
+which lines:
+
+```bash
+wiringmap diff            # your current files vs. your last commit
+wiringmap diff --open     # the same, on the map
+wiringmap diff --base main --head my-branch
+```
+
+It reports, in plain words:
+
+- **What needs a look:** files that no longer parse, new import cycles, signature
+  changes whose callers were not updated (and whether old calls will actually fail),
+  logic copied from an existing function, functions that lost all their callers, and
+  new third-party packages.
+- **What changed, file by file:** added, changed, deleted, and renamed or moved
+  functions and classes. Moves and renames are recognised from the code itself, even
+  across files.
+- **What depends on it:** the other files that import the changed ones.
+
+`--markdown` prints the summary for a pull request or an AI agent, and `--json` gives
+tools the full result. Nothing is checked out or changed: the old version is read
+straight from git.
+
 ## Private by design
 
 - wiringmap **reads** your code; it never runs it.
@@ -81,6 +107,7 @@ tools on it.
 
 - [x] Code graph for Python, with call links that say how sure they are
 - [x] Interactive offline map with search and source view
+- [x] **`wiringmap diff`:** what an AI agent (or anyone) changed in the structure
 - [ ] **Flow view:** follow a command or web request step by step through the code
 - [ ] **Framework wiring:** FastAPI `Depends`, callbacks and overridden methods as links
 - [ ] **Plain-English explanations** of files, folders and flows from a local model

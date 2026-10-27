@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- `wiringmap diff`: what changed in the code's structure between your last commit and
+  your current files, or between any two commits, branches or tags. It flags files that
+  stopped parsing, new import cycles, breaking signature changes with callers that were
+  not updated, copied logic, functions that lost all their callers and new third-party
+  packages, and lists every change file by file. Output as a terminal summary,
+  Markdown, JSON, or on the map (`--open`).
+- The graph records a `hash` and a `shape` fingerprint for code, and the names of calls
+  it could not link.
+
 ### Fixed
 
 - Running wiringmap in a folder without Python files now explains what happened

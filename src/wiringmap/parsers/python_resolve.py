@@ -25,6 +25,7 @@ from wiringmap.parsers.python_ast import (
 BUILTINS = frozenset(dir(builtins))
 STDLIB = frozenset(sys.stdlib_module_names)
 MAX_EXTERNAL_CALLS = 30
+MAX_UNRESOLVED_NAMES = 40
 MAX_RESOLVE_DEPTH = 12
 
 # A call like ``obj.<name>()`` on an object of unknown type is linked to the only
@@ -580,6 +581,8 @@ class PythonResolver:
     def _add_module(self, module: PyModule) -> None:
         info = module.info
         attrs: dict = {"is_package": True} if module.is_package else {}
+        if info.code_hash:
+            attrs["hash"] = info.code_hash
         if info.error:
             attrs["parse_error"] = info.error
         if info.has_main_guard:
@@ -602,7 +605,7 @@ class PythonResolver:
         )
         for qual, cls in info.classes.items():
             cid = f"{module.id}:{qual}"
-            attrs = {}
+            attrs = {"hash": cls.code_hash}
             if cls.bases:
                 attrs["bases"] = cls.bases
             if cls.decorators:
@@ -621,7 +624,9 @@ class PythonResolver:
                 )
             )
         for qual, func in info.functions.items():
-            attrs = {}
+            attrs = {"hash": func.code_hash}
+            if func.shape_hash:
+                attrs["shape"] = func.shape_hash
             if func.is_async:
                 attrs["async"] = True
             if func.decorators:
@@ -711,6 +716,7 @@ class PythonResolver:
         caller = ctx.module.id if ctx.qualname == "" else f"{ctx.module.id}:{ctx.qualname}"
         external: set[str] = set()
         unresolved = 0
+        unresolved_names: set[str] = set()
         for call in scope.calls:
             result = self.resolve_call(ctx, call.parts)
             if isinstance(result, tuple):
@@ -722,11 +728,15 @@ class PythonResolver:
                     external.add(result.ref)
             else:
                 unresolved += 1
+                unresolved_names.add(call.parts[-1])
         node = self.graph.nodes[caller]
         if external:
             node.attrs["external_calls"] = sorted(external)[:MAX_EXTERNAL_CALLS]
         if unresolved:
             node.attrs["unresolved_calls"] = unresolved
+            # Kept so a diff can tell "the call was removed" from "the call is still
+            # there but could not be linked this time".
+            node.attrs["unresolved_names"] = sorted(unresolved_names)[:MAX_UNRESOLVED_NAMES]
 
     def _mark_scripts(self, scripts: dict[str, str]) -> None:
         """Mark ``[project.scripts]`` targets such as ``shop.cli:main`` as entry points."""

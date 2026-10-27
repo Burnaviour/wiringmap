@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import time
 import webbrowser
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 from rich.table import Table
 
-from wiringmap import __version__
+from wiringmap import __version__, gitsnap
 from wiringmap.builder import build_graph
+from wiringmap.diff import diff_graphs
+from wiringmap.diff_report import to_markdown
 from wiringmap.graph import CodeGraph, NodeKind
 from wiringmap.render.html import SOURCE_BUDGET, collect_sources, render_report
 
@@ -133,6 +139,115 @@ def build(
         _print_summary(graph, elapsed)
     if open_report:
         webbrowser.open(target.resolve().as_uri())
+
+
+@app.command()
+def diff(
+    path: Annotated[
+        Path,
+        typer.Argument(exists=True, file_okay=False, resolve_path=True, help="Project to compare."),
+    ] = Path("."),
+    base: Annotated[
+        str, typer.Option("--base", "-b", help="Compare against this commit, branch or tag.")
+    ] = "HEAD",
+    head: Annotated[
+        str | None,
+        typer.Option(
+            "--head", help="Compare with this commit, branch or tag instead of your current files."
+        ),
+    ] = None,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Also write the result: .html (map), .md or .json."),
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print JSON instead of the summary (for tools).")
+    ] = False,
+    as_markdown: Annotated[
+        bool, typer.Option("--markdown", help="Print Markdown (for pull requests and agents).")
+    ] = False,
+    open_report: Annotated[
+        bool, typer.Option("--open", help="Show the changes on the map in your browser.")
+    ] = False,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option("--exclude", "-e", help="Extra gitignore-style pattern to skip. Repeatable."),
+    ] = None,
+    quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Print nothing on success.")] = False,
+) -> None:
+    """Show what changed in the code's structure, by default since your last commit."""
+    if as_json and as_markdown:
+        err.print("[red]Choose one of --json and --markdown.[/red]")
+        raise typer.Exit(2)
+    if output is not None and output.suffix.lower() not in (".html", ".md", ".json"):
+        err.print("[red]--output must end in .html, .md or .json.[/red]")
+        raise typer.Exit(2)
+    want_html = open_report or (output is not None and output.suffix.lower() == ".html")
+    try:
+        loc = gitsnap.locate(path)
+        base_commit = gitsnap.resolve(loc, base)
+        head_commit = gitsnap.resolve(loc, head) if head else None
+        submodules = set(gitsnap.submodules(loc)) | set(gitsnap.submodules(loc, base_commit))
+        if head_commit:
+            submodules |= set(gitsnap.submodules(loc, head_commit))
+        skip = [*(exclude or []), *(f"/{s}/" for s in sorted(submodules))]
+        with err.status("Comparing…", spinner="dots") if not quiet else _nothing():
+            before, _ = _graph_at(loc, base_commit, skip, want_sources=False)
+            if head_commit:
+                after, sources = _graph_at(loc, head_commit, skip, want_sources=want_html)
+            else:
+                after = build_graph(path, skip)
+                sources = collect_sources(path, after) if want_html else None
+    except gitsnap.GitError as exc:
+        err.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+
+    if not _has_python(before) and not _has_python(after):
+        _require_python(after, path)
+    head_label = (
+        gitsnap.describe(head, head_commit) if head and head_commit else "your current files"
+    )
+    result = diff_graphs(before, after, gitsnap.describe(base, base_commit), head_label)
+    markdown = to_markdown(result, after)
+
+    if as_json:
+        typer.echo(json.dumps(result.to_dict(), indent=2))
+    elif as_markdown:
+        typer.echo(markdown, nl=False)
+    elif not quiet:
+        Console().print(Markdown(markdown))
+
+    if output is not None:
+        suffix = output.suffix.lower()
+        if suffix == ".json":
+            _write(output, json.dumps(result.to_dict(), indent=2) + "\n", quiet=True)
+        elif suffix == ".md":
+            _write(output, markdown, quiet=True)
+        else:
+            _write(output, render_report(after, sources, diff=result), quiet=True)
+    if open_report:
+        target = output if output is not None and output.suffix.lower() == ".html" else None
+        if target is None:
+            target = _output_dir(path) / "diff.html"
+            _write(target, render_report(after, sources, diff=result), quiet=True)
+        webbrowser.open(target.resolve().as_uri())
+
+
+def _graph_at(
+    loc: gitsnap.RepoLocation, commit: str, skip: list[str], want_sources: bool
+) -> tuple[CodeGraph, dict | None]:
+    with gitsnap.checkout(loc, commit) as root:
+        graph = build_graph(root, skip)
+        return graph, collect_sources(root, graph) if want_sources else None
+
+
+def _has_python(graph: CodeGraph) -> bool:
+    return any(node.kind == NodeKind.MODULE for node in graph.nodes.values())
+
+
+@contextmanager
+def _nothing() -> Iterator[None]:
+    yield
 
 
 def _scan(path: Path, exclude: list[str] | None, quiet: bool) -> tuple[CodeGraph, float]:

@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 
+from wiringmap.diff import GraphDiff
 from wiringmap.graph import CodeGraph, NodeKind
 from wiringmap.parsers.python_ast import read_source
 
@@ -46,9 +47,14 @@ def collect_sources(root: Path, graph: CodeGraph, limit: int | None = SOURCE_BUD
     return sources
 
 
-def render_report(graph: CodeGraph, sources: dict[str, str] | None = None) -> str:
+def render_report(
+    graph: CodeGraph, sources: dict[str, str] | None = None, diff: GraphDiff | None = None
+) -> str:
+    """The report page; with ``diff``, the map also shows what changed."""
     template = (STATIC / "report.html").read_text(encoding="utf-8")
     payload = {"graph": graph.to_dict(), "sources": sources or {}}
+    if diff is not None:
+        payload["diff"] = diff.to_dict()
     slots = {
         "TITLE": html.escape(graph.root_name),
         "STYLE": (STATIC / "app.css").read_text(encoding="utf-8"),

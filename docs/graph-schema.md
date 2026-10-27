@@ -65,8 +65,11 @@ files would get the same id, both fall back to their path (`scripts.run`, `tools
 | class | `bases` | Base classes as written, including external ones |
 | class, function, method | `decorators` | Decorators as written |
 | function, method | `async` | `async def` |
+| module, class, function, method | `hash` | Fingerprint of the code. It ignores line numbers and docstrings, so moving code keeps it and editing code changes it. For modules, it covers the file's text |
+| function, method | `shape` | Fingerprint of the code's structure with local names blanked out, for spotting the same logic under different names. Only for functions with three or more statements |
 | module, class, function, method | `external_calls` | Calls into other packages, e.g. `requests.post` (up to 30) |
 | module, class, function, method | `unresolved_calls` | How many calls could not be linked to anything |
+| module, class, function, method | `unresolved_names` | The names of those calls (up to 40), so a diff can tell a removed call from one it could not link |
 | file | `language`, `size` | Detected language and size in bytes |
 | external | `stdlib` | Part of the Python standard library |
 

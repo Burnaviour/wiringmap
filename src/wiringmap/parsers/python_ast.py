@@ -8,6 +8,7 @@ later in :mod:`wiringmap.parsers.python_resolve`, once every file has been extra
 from __future__ import annotations
 
 import ast
+import hashlib
 import io
 import re
 import tokenize
@@ -63,6 +64,8 @@ class FunctionInfo(Scope):
     decorator_parts: list[Parts] = field(default_factory=list)
     self_name: str | None = None  # first parameter of a method ("self" / "cls")
     returns: Parts | None = None
+    code_hash: str = ""  # changes when the code changes; not when it moves or its docstring does
+    shape_hash: str | None = None  # same for the same logic under different names; None if tiny
 
 
 @dataclass
@@ -83,6 +86,7 @@ class ClassInfo(Scope):
     attr_from_call: dict[str, Parts] = field(default_factory=dict)
     # ``session_class = SecureCookieSession``: a class attribute naming another class/function.
     attr_alias: dict[str, Parts] = field(default_factory=dict)
+    code_hash: str = ""
 
 
 @dataclass
@@ -95,6 +99,7 @@ class ModuleInfo(Scope):
     functions: dict[str, FunctionInfo] = field(default_factory=dict)  # by qualname
     classes: dict[str, ClassInfo] = field(default_factory=dict)  # by qualname
     error: str | None = None
+    code_hash: str = ""  # of the file's text, line endings normalised
 
     def scope(self, qualname: str) -> Scope:
         if qualname == "":
@@ -112,6 +117,7 @@ def extract_module(path: str, source: str) -> ModuleInfo:
     """Extract the facts of one Python file; syntax errors are recorded, not raised."""
     info = ModuleInfo(qualname="", path=path)
     info.loc = sum(1 for line in source.splitlines() if line.strip())
+    info.code_hash = _digest("\n".join(source.splitlines()))
     try:
         tree = _parse(source, path)
         info.docstring = _docstring(tree)
@@ -257,6 +263,8 @@ class _Extractor(ast.NodeVisitor):
         for expr in [*node.decorator_list, *node.args.defaults, *node.args.kw_defaults]:
             if expr is not None:
                 self.visit(expr)
+        func.code_hash = _digest(_dump_def(node, [node.args, node.returns, *node.decorator_list]))
+        func.shape_hash = _shape_hash(node)
         self.module.functions[func.qualname] = func
         parent.children.append(func.qualname)
         self.stack.append(func)
@@ -280,6 +288,9 @@ class _Extractor(ast.NodeVisitor):
         )
         for expr in [*node.decorator_list, *node.bases, *(k.value for k in node.keywords)]:
             self.visit(expr)
+        cls.code_hash = _digest(
+            _dump_def(node, [*node.bases, *node.keywords, *node.decorator_list])
+        )
         self.module.classes[cls.qualname] = cls
         parent.children.append(cls.qualname)
         self.stack.append(cls)
@@ -425,3 +436,58 @@ def _string_list(node: ast.expr | None) -> list[str] | None:
     ):
         return [e.value for e in node.elts]  # type: ignore[attr-defined]
     return None
+
+
+# Fingerprints -----------------------------------------------------------------------
+
+# Functions with fewer statements than this get no shape: "return self.x" would match
+# hundreds of unrelated getters.
+MIN_SHAPE_STATEMENTS = 3
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _body_without_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+    body = node.body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        return body[1:]
+    return body
+
+
+def _dump_def(node, header: list) -> str:
+    """The definition as text, without positions or docstring, so moving it changes nothing."""
+    parts = [ast.dump(h, include_attributes=False) for h in header if h is not None]
+    parts += [ast.dump(stmt, include_attributes=False) for stmt in _body_without_docstring(node)]
+    return "\n".join(parts)
+
+
+def _shape_hash(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
+    """The body's structure with local names blanked out, to spot the same logic renamed.
+
+    Attribute names, literal values and the names of called functions are kept:
+    ``price.quantize(...)``, ``round(x, 2)`` and ``validate(x)`` say what the code does,
+    while variable names do not.
+    """
+    body = _body_without_docstring(node)
+    nodes = [n for stmt in body for n in ast.walk(stmt)]
+    if sum(isinstance(n, ast.stmt) for n in nodes) < MIN_SHAPE_STATEMENTS:
+        return None
+    callees = {id(n.func) for n in nodes if isinstance(n, ast.Call)}
+    tokens = [str(len(node.args.args))]
+    for n in nodes:
+        token = type(n).__name__
+        if isinstance(n, ast.Attribute):
+            token += "." + n.attr
+        elif isinstance(n, ast.Constant):
+            token += "=" + repr(n.value)[:40]
+        elif isinstance(n, ast.Name) and id(n) in callees:
+            token += ":" + n.id
+        tokens.append(token)
+    return _digest(" ".join(tokens))
