@@ -235,6 +235,108 @@
     return { elements, rep, nodeIds: new Set(elements.filter((e) => e.group === "nodes").map((e) => e.data.id)) };
   }
 
+  // The flow: one function's calls (or callers), as a graph you expand by clicking -------
+
+  const FLOW_LIMIT = 150; // functions on screen; beyond this layouts slow and labels blur
+  const FLOW_SIDE_FOLD = 3; // more test/example callers than this become one box
+
+  function buildFlowView({ root, up, depth }, open) {
+    const elements = [];
+    const ids = new Set();
+    const level = new Map([[root, 0]]);
+    let budget = FLOW_LIMIT;
+
+    const neighbours = (id) => {
+      if (up) {
+        return (inn.calls.get(id) || [])
+          .filter((e) => e.source !== id && nodes.has(e.source))
+          .map((e) => ({ other: e.source, e }))
+          .sort((a, b) => isSidePath(nodes.get(a.other).path) - isSidePath(nodes.get(b.other).path));
+      }
+      return (out.calls.get(id) || [])
+        .filter((e) => e.target !== id && nodes.has(e.target))
+        .map((e) => ({ other: e.target, e }))
+        .sort((a, b) => (a.e.line || 0) - (b.e.line || 0));
+    };
+
+    let seq = 0; // discovery order: calls in the order they happen, level by level
+    const addNode = (id) => {
+      ids.add(id);
+      budget -= 1;
+      seq += 1;
+      const n = nodes.get(id);
+      const entry = !!(n.attrs && n.attrs.entry_point);
+      const name = n.kind === "module" ? n.path : qualOf(id);
+      const where = n.kind === "module" ? "top-level code" : `${(n.path || "").split("/").pop()}:${n.line}`;
+      const st = DIFF ? STATUS.get(id) || null : null;
+      const label = (st ? MARK[st] : "") + (entry ? "▶ " : "") + name + "\n" + where;
+      elements.push({ group: "nodes", data: { id, label, kind: "fn", root: id === root, entry, st, seq, w: labelWidth(label) } });
+    };
+
+    addNode(root);
+    const queue = [root];
+    while (queue.length) {
+      const id = queue.shift();
+      let list = neighbours(id);
+      const side = list.filter((x) => isSidePath(nodes.get(x.other).path));
+      if (up && side.length > FLOW_SIDE_FOLD && (id !== root || side.length < list.length)) {
+        list = list.filter((x) => !side.includes(x));
+        const fold = `fold:${id}`;
+        const label = `${side.length} tests, examples or docs`;
+        elements.push({ group: "nodes", data: { id: fold, label, kind: "fold", w: labelWidth(label) } });
+        elements.push({ group: "edges", data: { id: `fe:${fold}`, source: fold, target: id, w: 1.6, conf: "resolved" } });
+      }
+      const opened = level.get(id) < depth || open.has(id);
+      let hidden = 0;
+      list.forEach(({ other, e }, i) => {
+        if (!ids.has(other)) {
+          if (!opened || budget <= 0) return void (hidden += 1);
+          addNode(other);
+          level.set(other, level.get(id) + 1);
+          queue.push(other);
+        }
+        const [source, target] = up ? [other, id] : [id, other];
+        elements.push({
+          group: "edges",
+          data: { id: `fe:${source}->${target}`, source, target, w: 1.6, conf: e.confidence || "resolved", order: up ? "" : String(i + 1) },
+        });
+      });
+      if (hidden) {
+        const node = elements.find((el) => el.group === "nodes" && el.data.id === id);
+        node.data.label += `  +${hidden}`;
+        node.data.more = hidden;
+        node.data.w = labelWidth(node.data.label);
+      }
+    }
+    // Two edges between the same pair (a calls b twice) would collide on one id.
+    const seen = new Set();
+    const unique = elements.filter((el) => el.group !== "edges" || (!seen.has(el.data.id) && seen.add(el.data.id)));
+    placeFlow(unique, level);
+    return { elements: unique, rep: new Map(), nodeIds: ids, flowRoot: root, capped: budget <= 0 };
+  }
+
+  // Left to right: one column per step, calls top to bottom in the order they happen.
+  function placeFlow(elements, level) {
+    const columns = new Map();
+    const fnNodes = elements.filter((el) => el.group === "nodes");
+    for (const el of fnNodes) {
+      const parentLevel = el.data.kind === "fold" ? level.get(el.data.id.slice(5)) : undefined;
+      const col = el.data.kind === "fold" ? (parentLevel || 0) + 1 : level.get(el.data.id) || 0;
+      if (!columns.has(col)) columns.set(col, []);
+      columns.get(col).push(el);
+    }
+    let x = 0;
+    for (const col of [...columns.keys()].sort((a, b) => a - b)) {
+      const items = columns.get(col).sort((a, b) => (a.data.seq || 1e9) - (b.data.seq || 1e9));
+      const width = Math.max(...items.map((el) => el.data.w || 120));
+      items.forEach((el, i) => {
+        el.data.px = x + width / 2;
+        el.data.py = (i - (items.length - 1) / 2) * 62;
+      });
+      x += width + 90;
+    }
+  }
+
   // Folders that are rarely the first thing to read; they start closed.
   const SIDE_FOLDERS = /^(tests?|testing|fixtures|examples?|docs?|benchmarks?|__snapshots__|migrations?|alembic)$/i;
 
@@ -343,6 +445,14 @@
         },
       },
       { selector: "edge[?typeOnly]", style: { "line-style": "dashed" } },
+      { selector: "node[kind = 'fn']", style: { height: 40, "line-height": 1.3, "text-max-width": 260 } },
+      { selector: "node[?root]", style: { "background-color": c("--accent-weak"), "border-color": c("--accent"), "border-width": 2.5, "font-weight": 600 } },
+      { selector: "node[?more]", style: { "border-style": "double", "border-width": 3 } },
+      { selector: "node[kind = 'fold']", style: { "background-opacity": 0, "border-style": "dotted", color: c("--muted"), height: 30 } },
+      { selector: "edge[order]", style: { label: "data(order)", "font-size": 10, color: c("--muted"), "text-background-color": c("--bg"), "text-background-opacity": 1, "text-background-padding": 2 } },
+      { selector: "edge[conf]", style: { "curve-style": "taxi", "taxi-direction": "horizontal", "taxi-turn": "45%" } },
+      { selector: "edge[conf = 'inferred']", style: { "line-style": "dashed" } },
+      { selector: "edge[conf = 'guessed']", style: { "line-style": "dotted", opacity: 0.55 } },
       { selector: ".faded", style: { opacity: 0.13 } },
       { selector: "edge.faded", style: { opacity: 0.06 } },
       { selector: "node.nb-out", style: { "border-color": c("--accent"), "border-width": 2 } },
@@ -378,13 +488,17 @@
   }
 
   // Lay out the map, put unconnected pieces side by side in rows, then glide there.
-  function arrange(cy, randomize, done) {
+  function arrange(cy, randomize, done, flowRoot) {
     const leaves = cy.nodes().filter((n) => !n.isParent());
     const start = new Map(leaves.map((n) => [n.id(), { ...n.position() }]));
-    const layout = cy.layout(layoutOptions(randomize, leaves.length));
+    const layout = flowRoot
+      ? cy.layout({ name: "preset", positions: (n) => ({ x: n.data("px") || 0, y: n.data("py") || 0 }), fit: false, animate: false })
+      : cy.layout(layoutOptions(randomize, leaves.length));
     layout.one("layoutstop", () => {
-      separate(cy);
-      packComponents(cy);
+      if (!flowRoot) {
+        separate(cy);
+        packComponents(cy);
+      }
       const view = fittedViewport(cy);
       if (randomize || leaves.length > 350) {
         cy.viewport(view);
@@ -500,7 +614,7 @@
       });
       cy.on("tap", "node", (ev) => handlers.current.onSelect(ev.target.id()));
       cy.on("tap", (ev) => ev.target === cy && handlers.current.onSelect(null));
-      cy.on("dbltap", "node[kind = 'folder'], node[kind = 'group']", (ev) => handlers.current.onToggle(ev.target.id()));
+      cy.on("dbltap", "node[kind = 'folder'], node[kind = 'group'], node[kind = 'fn']", (ev) => handlers.current.onToggle(ev.target.id()));
       const scheme = window.matchMedia("(prefers-color-scheme: dark)");
       const restyle = () => cy.style(graphStyle());
       scheme.addEventListener("change", restyle);
@@ -550,7 +664,7 @@
       onBusy(true);
       // A timer, not requestAnimationFrame: it lets "Arranging…" paint first, and it
       // still runs when the report was opened in a background tab.
-      const timer = setTimeout(() => arrange(cy, placed === 0, () => onBusy(false)), 30);
+      const timer = setTimeout(() => arrange(cy, placed === 0, () => onBusy(false), view.flowRoot), 30);
       return () => clearTimeout(timer);
     }, [view]);
 
@@ -562,6 +676,7 @@
         if (!focus) return;
         const node = cy.getElementById(focus);
         if (node.empty()) return;
+        if (cy.nodes("[kind = 'fn']").nonempty()) return void node.addClass("sel");
         cy.nodes().filter((n) => !n.isParent()).addClass("faded");
         cy.edges().addClass("faded");
         node.removeClass("faded").addClass("sel");
@@ -777,7 +892,7 @@
     </${Block}>`;
   }
 
-  function ModuleCard({ id, onSelect, onCode, onCenter }) {
+  function ModuleCard({ id, onSelect, onCode, onCenter, onFlow }) {
     const n = nodes.get(id);
     const a = n.attrs || {};
     const uses = (out.imports.get(id) || []).filter((e) => kindOf(e.target) === "module");
@@ -805,6 +920,7 @@
       <div class="actions">
         ${SOURCES[n.path] !== undefined && html`<button class="btn" onClick=${() => onCode(n.path, 1, 0)}>View source</button>`}
         <button class="btn" onClick=${onCenter}>Show on map</button>
+        ${(out.calls.get(id) || []).length > 0 && html`<button class="btn primary" onClick=${() => onFlow(id, false)}>Flow of its top-level code</button>`}
       </div>
       <${Block} title="Uses" count=${uses.length} dot="out" hint=${uses.length ? null : "Imports no other file in this project."}>
         <ul class="list">${uses.map((e) => html`<${Row} id=${e.target} name=${moduleLabel(e.target)} meta=${e.attrs && e.attrs.type_only ? "types only" : ""} onSelect=${onSelect} />`)}</ul>
@@ -831,7 +947,7 @@
     </ul>`;
   }
 
-  function SymbolCard({ id, onSelect, onCode, onCenter }) {
+  function SymbolCard({ id, onSelect, onCode, onCenter, onFlow }) {
     const n = nodes.get(id);
     const a = n.attrs || {};
     const calls = out.calls.get(id) || [];
@@ -856,6 +972,8 @@
       ${a.decorators && html`<div class="chips" style="margin-top:8px">${a.decorators.map((d) => html`<span class="chip">@${d}</span>`)}</div>`}
       ${n.docstring ? html`<div class="doc">${n.docstring}</div>` : html`<div class="doc none">No docstring.</div>`}
       <div class="actions">
+        <button class="btn primary" onClick=${() => onFlow(id, false)} title="What it calls, step by step">Show flow</button>
+        <button class="btn" onClick=${() => onFlow(id, true)} title="What calls it, back to where the program starts">What calls it</button>
         ${SOURCES[n.path] !== undefined && html`<button class="btn" onClick=${() => onCode(n.path, n.line, n.end_line)}>View source</button>`}
         <button class="btn" onClick=${onCenter}>Show on map</button>
       </div>
@@ -1127,10 +1245,22 @@
       } catch (e) {}
     }, [theme]);
 
-    const view = useMemo(() => buildView(expanded, mode, showExternal), [expanded, mode, showExternal]);
+    const [flow, setFlow] = useState(null); // { root, up, depth } while the flow view is open
+    const [flowOpen, setFlowOpen] = useState(() => new Set());
+    const view = useMemo(
+      () => (flow ? buildFlowView(flow, flowOpen) : buildView(expanded, mode, showExternal)),
+      [flow, flowOpen, expanded, mode, showExternal]
+    );
+    const openFlow = useCallback((root, up) => {
+      setFlowOpen(new Set());
+      setFlow({ root, up: !!up, depth: 2 });
+      setSelected(root);
+      setCode(null);
+    }, []);
 
     const focus = useMemo(() => {
       if (!selected) return null;
+      if (flow) return view.nodeIds.has(selected) ? selected : null;
       const mod = moduleOf(selected);
       if (mod) return view.rep.get(mod) || null;
       if (view.nodeIds.has(selected)) return selected;
@@ -1159,6 +1289,15 @@
     const onListSelect = useCallback((id) => select(id, true), [select]);
 
     const toggle = useCallback((id) => {
+      if (kindOf(id) !== "directory" && !id.startsWith("dir:")) {
+        setFlowOpen((prev) => {
+          const next = new Set(prev);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          return next;
+        });
+        return;
+      }
       setExpanded((prev) => {
         const next = new Set(prev);
         if (next.has(id)) next.delete(id);
@@ -1213,13 +1352,36 @@
                 onToggle=${toggle}
                 onBusy=${setBusy}
               />`}
-          <div class="overlay tools">
+          ${flow &&
+          html`<div class="overlay tools flowbar">
+            <button class="btn" onClick=${() => setFlow(null)} title="Back to the map of files">← Map</button>
+            <div class="seg" role="group" aria-label="Flow direction">
+              <button aria-pressed=${!flow.up} onClick=${() => (setFlowOpen(new Set()), setFlow({ ...flow, up: false }))}>What it calls</button>
+              <button aria-pressed=${flow.up} onClick=${() => (setFlowOpen(new Set()), setFlow({ ...flow, up: true }))}>What calls it</button>
+            </div>
+            <div class="seg" role="group" aria-label="Steps shown">
+              <button disabled=${flow.depth <= 1} onClick=${() => setFlow({ ...flow, depth: flow.depth - 1 })} aria-label="Fewer steps">−</button>
+              <button disabled title="Steps followed">${flow.depth} steps</button>
+              <button disabled=${flow.depth >= 6 || view.capped} onClick=${() => setFlow({ ...flow, depth: flow.depth + 1 })} aria-label="More steps">+</button>
+            </div>
+            <button class="btn" onClick=${() => setFitTick((t) => t + 1)}>Fit</button>
+          </div>`}
+          <div class="overlay tools" hidden=${!!flow}>
             <button class="btn" onClick=${() => setFitTick((t) => t + 1)} title="Fit the whole map on screen">Fit</button>
             <button class="btn" disabled=${totalModules > MAX_EXPAND_ALL} title=${totalModules > MAX_EXPAND_ALL ? "Too many files to show at once; open folders one by one" : "Open every folder"} onClick=${() => setExpanded(allFolders())}>Expand all</button>
             <button class="btn" onClick=${() => setExpanded(new Set())}>Collapse all</button>
           </div>
           ${busy && html`<div class="busy">Arranging…</div>`}
-          ${DIFF
+          ${flow &&
+          html`<div class="legend" aria-label="Legend">
+            <span>${flow.up ? "Arrows: who calls whom" : "Numbers: order of the calls"}</span>
+            <span><i class="ln solid"></i>Certain</span>
+            <span><i class="ln dashed"></i>Through a type</span>
+            <span><i class="ln dotted"></i>Guessed</span>
+            <span><i class="sw more"></i>Double-click: more steps</span>
+            ${view.capped && html`<span>Showing the first ${FLOW_LIMIT}</span>`}
+          </div>`}
+          ${DIFF && !flow
             ? html`<div class="legend" aria-label="Legend">
                 <span><i class="sw st-added"></i>+ Added</span>
                 <span><i class="sw st-changed"></i>~ Changed</span>
@@ -1228,7 +1390,7 @@
                 <span><i class="sw" style="opacity:.4"></i>Unchanged</span>
               </div>`
             : null}
-          <div class="legend" aria-label="Legend" hidden=${!!DIFF}>
+          <div class="legend" aria-label="Legend" hidden=${!!DIFF || !!flow}>
             <span><i class="sw"></i>Python file</span>
             <span><i class="sw folder"></i>Folder (double-click)</span>
             <span><i class="sw entry"></i>Entry point</span>
@@ -1240,8 +1402,8 @@
         <aside class="inspector" ref=${inspector} aria-label="Details">
           ${!selected && (DIFF ? html`<${ChangesPanel} onSelect=${onListSelect} />` : html`<${Welcome} onSelect=${onListSelect} />`)}
           ${selected && selected.startsWith("ghost:") && html`<${GhostCard} id=${selected} onSelect=${onListSelect} />`}
-          ${kind === "module" && html`<${ModuleCard} id=${selected} onSelect=${onListSelect} onCode=${(p, l, e) => setCode({ path: p, line: l, end: e })} onCenter=${center} />`}
-          ${SYMBOL.has(kind) && html`<${SymbolCard} id=${selected} onSelect=${onListSelect} onCode=${(p, l, e) => setCode({ path: p, line: l, end: e })} onCenter=${center} />`}
+          ${kind === "module" && html`<${ModuleCard} id=${selected} onSelect=${onListSelect} onCode=${(p, l, e) => setCode({ path: p, line: l, end: e })} onCenter=${center} onFlow=${openFlow} />`}
+          ${SYMBOL.has(kind) && html`<${SymbolCard} id=${selected} onSelect=${onListSelect} onCode=${(p, l, e) => setCode({ path: p, line: l, end: e })} onCenter=${center} onFlow=${openFlow} />`}
           ${kind === "directory" && html`<${FolderCard} id=${selected} expanded=${expanded} onSelect=${onListSelect} onToggle=${toggle} onCenter=${center} />`}
           ${kind === "external" && html`<${ExternalCard} id=${selected} onSelect=${onListSelect} />`}
           ${code && html`<${CodePanel} ...${code} onClose=${() => setCode(null)} />`}
