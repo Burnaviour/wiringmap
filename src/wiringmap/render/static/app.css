@@ -385,3 +385,14 @@ section.block > h3 .dot.in { background: var(--usedby); }
 .alert.info { background: var(--chg-bg); color: var(--text); }
 .alert.info code { word-break: break-word; }
 .legend[hidden] { display: none; }
+
+/* Flow view ------------------------------------------------------------------------------ */
+
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { filter: brightness(1.08); }
+.overlay.tools[hidden] { display: none; }
+.flowbar .seg button:disabled { opacity: 1; cursor: default; color: var(--muted); }
+.ln.solid { border-top-color: var(--edge); }
+.ln.dashed { border-top: 2px dashed var(--edge); }
+.ln.dotted { border-top: 2px dotted var(--edge); }
+.sw.more { border-style: double; border-width: 3px; }

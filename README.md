@@ -55,6 +55,38 @@ folder ignores itself, so it is never committed by accident.
 - **Big projects work too.** pandas (1,411 files) scans in under 8 seconds, and its
   report opens in under one.
 
+## Follow how it works, step by step
+
+Pick any function and see what it calls, in the order the calls happen, a few steps
+deep. Or reverse it and see what calls it, back to where the program starts:
+
+```bash
+wiringmap flow login_access_token      # what it does, step by step
+wiringmap flow crud.create_user --up   # who calls it: routes, scripts, tests
+```
+
+This is the real output for the login route of the
+[FastAPI full-stack template](https://github.com/fastapi/full-stack-fastapi-template),
+including the library calls each step makes:
+
+```text
+login_access_token  (backend/app/api/routes/login.py:24)  · starts here: http
+   uses datetime.timedelta, fastapi.HTTPException
+├─ authenticate  backend/app/crud.py:45
+│  uses sqlmodel.Session.add, sqlmodel.Session.commit, sqlmodel.Session.refresh
+│  ├─ get_user_by_email  backend/app/crud.py:34
+│  │  uses sqlmodel.Session.exec, sqlmodel.select
+│  └─ verify_password  backend/app/core/security.py:29
+│     uses pwdlib.PasswordHash.verify_and_update
+├─ Token (class)  backend/app/models.py:114
+└─ create_access_token  backend/app/core/security.py:22
+   uses datetime.datetime.now, jwt.encode
+```
+
+In the report, **Show flow** on any function draws the same flow as a graph you can
+expand by double-clicking. Lines are solid when a link is certain, dashed when it was
+worked out from a type hint, and dotted when it was guessed.
+
 ## See what your AI agent changed
 
 After an agent has edited your code, ask what changed in the *structure*, not just
@@ -108,7 +140,7 @@ tools on it.
 - [x] Code graph for Python, with call links that say how sure they are
 - [x] Interactive offline map with search and source view
 - [x] **`wiringmap diff`:** what an AI agent (or anyone) changed in the structure
-- [ ] **Flow view:** follow a command or web request step by step through the code
+- [x] **Flow view:** follow a command or web request step by step through the code
 - [ ] **Framework wiring:** FastAPI `Depends`, callbacks and overridden methods as links
 - [ ] **Plain-English explanations** of files, folders and flows from a local model
       (Ollama), optional

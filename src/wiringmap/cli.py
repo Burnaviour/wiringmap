@@ -21,6 +21,7 @@ from wiringmap import __version__, gitsnap
 from wiringmap.builder import build_graph
 from wiringmap.diff import diff_graphs
 from wiringmap.diff_report import to_markdown
+from wiringmap.flow import FlowError, build_flow, find, render_text
 from wiringmap.graph import CodeGraph, NodeKind
 from wiringmap.render.html import SOURCE_BUDGET, collect_sources, render_report
 
@@ -244,6 +245,43 @@ def diff(
             target = _output_dir(path) / "diff.html"
             _write(target, render_report(after, sources, diff=result), quiet=True)
         webbrowser.open(target.resolve().as_uri())
+
+
+@app.command()
+def flow(
+    name: Annotated[
+        str,
+        typer.Argument(help="Function, method, class or module, e.g. checkout or Cart.total."),
+    ],
+    path: Annotated[
+        Path,
+        typer.Argument(exists=True, file_okay=False, resolve_path=True, help="Project to read."),
+    ] = Path("."),
+    up: Annotated[
+        bool, typer.Option("--up", help="Show what calls it, instead of what it calls.")
+    ] = False,
+    depth: Annotated[
+        int, typer.Option("--depth", "-d", min=1, max=10, help="How many steps to follow.")
+    ] = 2,
+    as_json: Annotated[bool, typer.Option("--json", help="Print JSON (for tools).")] = False,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option("--exclude", "-e", help="Extra gitignore-style pattern to skip. Repeatable."),
+    ] = None,
+) -> None:
+    """Follow a function step by step: what it calls, or with --up, what calls it."""
+    graph = build_graph(path, exclude or [])
+    _require_python(graph, path)
+    try:
+        root = find(graph, name)
+    except FlowError as exc:
+        err.print(f"[red]{exc}[/red]", highlight=False)
+        raise typer.Exit(1) from None
+    tree = build_flow(graph, root, direction="up" if up else "down", depth=depth)
+    if as_json:
+        typer.echo(json.dumps(tree.to_dict(), indent=2))
+    else:
+        typer.echo(render_text(tree, direction="up" if up else "down"), nl=False)
 
 
 def _graph_at(
