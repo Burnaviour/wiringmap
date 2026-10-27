@@ -59,6 +59,19 @@ For each call, the resolver tries in order:
 Calls into other packages are recorded per function (`external_calls`), calls to
 builtins are ignored, and everything else is counted as `unresolved_calls`.
 
+## Comparing versions: `wiringmap diff`
+
+| Module | Job |
+|---|---|
+| `gitsnap.py` | Reads a past version out of git without touching the working tree: it lists the commit's files (`git ls-tree`) and fetches only the ones the scanner reads (`git cat-file --batch`). `git archive` is avoided because `export-ignore` would hide files |
+| `diff.py` | Compares two graphs. Renames and moves are matched by the code `hash`; duplicate logic by `shape`; import cycles with Tarjan's algorithm on the file import graph |
+| `diff_report.py` | Turns the result into Markdown for the terminal, pull requests and AI agents |
+
+Static analysis cannot link every call, so the diff is careful about claims that rest
+on a missing link. For example, a function is only reported as having "lost all its
+callers" when no unlinked call anywhere in the project has its name. Classes and
+functions inside a file that does not parse are treated as unknown, not as removed.
+
 ## The viewer
 
 `render/static/` holds the template (`report.html`), styles (`app.css`) and the app

@@ -59,7 +59,10 @@ def test_build_command_writes_report_and_graph(make_repo):
     assert result.exit_code == 0, result.output
     page = (root / ".wiringmap" / "report.html").read_text(encoding="utf-8")
     assert embedded(page)["sources"]["app.py"].startswith("def main")
-    assert json.loads((root / ".wiringmap" / "graph.json").read_text())["root_name"] == root.name
+    assert (
+        json.loads((root / ".wiringmap" / "graph.json").read_text(encoding="utf-8"))["root_name"]
+        == root.name
+    )
 
 
 def test_build_without_source(make_repo, tmp_path_factory):

@@ -24,9 +24,9 @@ def test_scan_writes_default_output_that_ignores_itself(make_repo):
     root = make_repo({"app.py": "def main():\n    pass\n"})
     result = runner.invoke(app, ["scan", str(root)])
     assert result.exit_code == 0, result.output
-    graph = json.loads((root / ".wiringmap" / "graph.json").read_text())
+    graph = json.loads((root / ".wiringmap" / "graph.json").read_text(encoding="utf-8"))
     assert "app:main" in {n["id"] for n in graph["nodes"]}
-    assert (root / ".wiringmap" / ".gitignore").read_text().splitlines()[-1] == "*"
+    assert (root / ".wiringmap" / ".gitignore").read_text(encoding="utf-8").splitlines()[-1] == "*"
 
 
 def test_scan_to_stdout_prints_only_json():
@@ -40,8 +40,8 @@ def test_scan_exclude(make_repo, tmp_path_factory):
     out = tmp_path_factory.mktemp("out") / "g.json"
     result = runner.invoke(app, ["scan", str(root), "-o", str(out), "-q", "-e", "tests/"])
     assert result.exit_code == 0
-    assert {n["id"] for n in json.loads(out.read_text())["nodes"]} >= {"app"}
-    assert "test_app" not in out.read_text()
+    assert {n["id"] for n in json.loads(out.read_text(encoding="utf-8"))["nodes"]} >= {"app"}
+    assert "test_app" not in out.read_text(encoding="utf-8")
 
 
 def test_scan_reports_unwritable_output_cleanly(make_repo):

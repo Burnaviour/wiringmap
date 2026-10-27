@@ -113,6 +113,41 @@
   const firstLine = (doc) => (doc ? doc.split(/\n\s*\n/)[0].replace(/\s+/g, " ").trim() : "");
   const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
 
+  // Diff mode (wiringmap diff): what changed since another version -------------------
+
+  const DIFF = DATA.diff || null;
+  const STATUS = new Map(); // node id -> "added" | "changed" | "moved" | "broken"
+  const GHOSTS = new Map(); // folder id -> deleted files that lived there
+  const changedInside = new Map(); // module id -> changed classes and functions inside it
+  const MARK = { added: "+ ", changed: "~ ", moved: "→ ", broken: "! ", removed: "× " };
+  const STATUS_WORD = { added: "added", changed: "changed", moved: "renamed or moved", broken: "no longer parses", removed: "deleted" };
+  const moduleIdOf = (id) => (id.includes(":") && !/^(dir|file|ext|ghost):/.test(id) ? id.slice(0, id.indexOf(":")) : null);
+  if (DIFF) {
+    for (const status of ["added", "changed", "moved"]) for (const item of DIFF[status]) STATUS.set(item.id, status);
+    for (const item of DIFF.broken) STATUS.set(item.id, "broken");
+    for (const item of [...DIFF.added, ...DIFF.changed, ...DIFF.moved, ...DIFF.removed]) {
+      const mod = moduleIdOf(item.id);
+      if (mod && nodes.has(mod)) changedInside.set(mod, (changedInside.get(mod) || 0) + 1);
+    }
+    for (const item of DIFF.removed) {
+      if (item.kind !== "module" || !item.path) continue;
+      const slash = item.path.lastIndexOf("/");
+      const dir = slash < 0 ? ROOT : "dir:" + item.path.slice(0, slash);
+      push(GHOSTS, nodes.has(dir) ? dir : ROOT, item);
+    }
+  }
+  // A file's colour on the map: its own status, or "changed" when only its contents did.
+  const moduleStatus = (id) => STATUS.get(id) || (changedInside.get(id) ? "changed" : null);
+  const changesUnder = new Map(); // folder id -> changed or deleted files beneath it
+  if (DIFF) {
+    const bump = (from, by) => {
+      for (const a of [from, ...ancestorsOf(from)]) if (isDir(a)) changesUnder.set(a, (changesUnder.get(a) || 0) + by);
+    };
+    for (const n of G.nodes) if (n.kind === "module" && moduleStatus(n.id)) bump(n.id, 1);
+    for (const [dir, items] of GHOSTS) bump(dir, items.length);
+  }
+  const signatureChange = (id) => (DIFF ? DIFF.signature_changes.find((c) => c.id === id) : null);
+
   // The map: which boxes are visible ------------------------------------------------
 
   function buildView(expanded, mode, showExternal) {
@@ -122,12 +157,20 @@
     function addModule(id, parent) {
       const n = nodes.get(id);
       const entry = !!(n.attrs && n.attrs.entry_point);
-      const label = (entry ? "▶ " : "") + n.name;
+      const st = DIFF ? moduleStatus(id) : null;
+      const label = (st ? MARK[st] : "") + (entry ? "▶ " : "") + n.name;
       rep.set(id, id);
       elements.push({
         group: "nodes",
-        data: { id, parent, label, kind: "module", entry, error: !!(n.attrs && n.attrs.parse_error), w: labelWidth(label) },
+        data: { id, parent, label, kind: "module", entry, st, dim: !!DIFF && !st, error: !!(n.attrs && n.attrs.parse_error), w: labelWidth(label) },
       });
+    }
+
+    function addGhosts(dirId, parent) {
+      for (const item of GHOSTS.get(dirId) || []) {
+        const label = MARK.removed + item.path.slice(item.path.lastIndexOf("/") + 1);
+        elements.push({ group: "nodes", data: { id: "ghost:" + item.id, parent, label, kind: "module", st: "removed", w: labelWidth(label) } });
+      }
     }
 
     function addDir(dirId, parent) {
@@ -135,15 +178,18 @@
       if (expanded.has(id)) {
         elements.push({ group: "nodes", data: { id, parent, label: label + "/", kind: "group" } });
         for (const k of displayKids(id)) (isDir(k) ? addDir : addModule)(k, id);
+        addGhosts(id, id);
         return;
       }
       const count = pyCount.get(id);
-      const text = `${label}/\n${plural(count, "module")}`;
-      elements.push({ group: "nodes", data: { id, parent, label: text, kind: "folder", w: labelWidth(text) } });
+      const changes = changesUnder.get(id) || 0;
+      const text = `${label}/\n${plural(count, "module")}${changes ? ` · ${changes} changed` : ""}`;
+      elements.push({ group: "nodes", data: { id, parent, label: text, kind: "folder", chg: changes > 0, dim: !!DIFF && !changes, w: labelWidth(text) } });
       forEachModule(id, (m) => rep.set(m, id));
     }
 
     for (const k of displayKids(ROOT)) (isDir(k) ? addDir : addModule)(k, undefined);
+    addGhosts(ROOT, undefined);
 
     const links = new Map();
     const link = (s, t, typeOnly) => {
@@ -203,12 +249,23 @@
     for (;;) {
       frontier.sort((a, b) => a.depth - b.depth || pyCount.get(b.id) - pyCount.get(a.id));
       const i = frontier.findIndex((f) => leaves - 1 + displayKids(f.id).length <= INITIAL_LEAVES);
-      if (i < 0) return expanded;
+      if (i < 0) return withChanges(expanded);
       const [f] = frontier.splice(i, 1);
       expanded.add(f.id);
       leaves += displayKids(f.id).length - 1;
       for (const k of displayKids(f.id)) if (isDir(k) && opens(k)) frontier.push({ id: compact(k).id, depth: f.depth + 1 });
     }
+  }
+
+  // In diff mode, also open every folder that holds a change, so changes are on screen.
+  function withChanges(expanded) {
+    if (!DIFF) return expanded;
+    const open = new Set(expanded);
+    const changed = G.nodes.filter((n) => n.kind === "module" && moduleStatus(n.id)).map((n) => n.id);
+    if (changed.length > 80) return open; // too many to show at once; folders show counts
+    for (const id of changed) for (const d of dirsAbove(id)) open.add(compact(d).id);
+    for (const dir of GHOSTS.keys()) if (dir !== ROOT) for (const d of [dir, ...dirsAbove(dir)]) open.add(compact(d).id);
+    return open;
   }
 
   function allFolders() {
@@ -266,6 +323,13 @@
       { selector: "node[kind = 'external']", style: { "background-opacity": 0, "border-style": "dotted", color: c("--muted") } },
       { selector: "node[?entry]", style: { "border-color": c("--ok"), "border-width": 2 } },
       { selector: "node[?error]", style: { "border-color": c("--danger"), "border-style": "dashed", "border-width": 2 } },
+      { selector: "node[st = 'added']", style: { "background-color": c("--add-bg"), "border-color": c("--add"), "border-width": 1.5 } },
+      { selector: "node[st = 'changed']", style: { "background-color": c("--chg-bg"), "border-color": c("--chg"), "border-width": 1.5 } },
+      { selector: "node[st = 'moved']", style: { "background-color": c("--mov-bg"), "border-color": c("--mov"), "border-width": 1.5 } },
+      { selector: "node[st = 'broken']", style: { "background-color": c("--danger-weak"), "border-color": c("--danger"), "border-style": "dashed", "border-width": 2 } },
+      { selector: "node[st = 'removed']", style: { "background-opacity": 0, "border-color": c("--danger"), "border-style": "dashed", color: c("--danger") } },
+      { selector: "node[?chg]", style: { "border-color": c("--chg"), "border-width": 1.5 } },
+      { selector: "node[?dim]", style: { opacity: 0.4 } },
       {
         selector: "edge",
         style: {
@@ -283,6 +347,7 @@
       { selector: "edge.faded", style: { opacity: 0.06 } },
       { selector: "node.nb-out", style: { "border-color": c("--accent"), "border-width": 2 } },
       { selector: "node.nb-in", style: { "border-color": c("--usedby"), "border-width": 2 } },
+      { selector: "node.sel, node.nb-out, node.nb-in", style: { opacity: 1 } },
       { selector: "node.sel", style: { "border-color": c("--accent"), "border-width": 3, "background-color": c("--accent-weak") } },
       { selector: "edge.hl-out", style: { "line-color": c("--accent"), "target-arrow-color": c("--accent"), opacity: 1, "z-index": 9 } },
       { selector: "edge.hl-in", style: { "line-color": c("--usedby"), "target-arrow-color": c("--usedby"), opacity: 1, "z-index": 9 } },
@@ -727,6 +792,7 @@
         <h2>${n.name}</h2>
         <span class="badge kind">${a.is_package ? "package" : "module"}</span>
         ${a.entry_point && html`<span class="badge entry">entry point · ${a.entry_point}</span>`}
+        <${StatusBadge} id=${id} />
       </div>
       <div class="loc mono">${n.path} · ${id}</div>
       ${a.parse_error && html`<div class="alert">Not parsed: ${a.parse_error}</div>`}
@@ -782,8 +848,10 @@
         <h2>${n.name}</h2>
         <span class="badge kind">${a.async ? "async " : ""}${n.kind}</span>
         ${a.entry_point && html`<span class="badge entry">entry point · ${a.entry_point}</span>`}
+        <${StatusBadge} id=${id} />
       </div>
       ${n.signature && html`<div class="sig mono">${n.name}${n.signature}</div>`}
+      ${signatureChange(id) && html`<div class="alert info">Signature changed. Before: <code>${signatureChange(id).before}</code></div>`}
       <div class="loc mono">${n.path}:${n.line}–${n.end_line} · ${plural(n.loc || 0, "line")}</div>
       ${a.decorators && html`<div class="chips" style="margin-top:8px">${a.decorators.map((d) => html`<span class="chip">@${d}</span>`)}</div>`}
       ${n.docstring ? html`<div class="doc">${n.docstring}</div>` : html`<div class="doc none">No docstring.</div>`}
@@ -904,6 +972,78 @@
     .filter(([, c]) => c > 0)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 6);
+
+  function StatusBadge({ id }) {
+    if (!DIFF) return null;
+    const st = STATUS.get(id) || (nodes.get(id) && nodes.get(id).kind === "module" ? moduleStatus(id) : null);
+    if (!st) return null;
+    const moved = st === "moved" ? DIFF.moved.find((m) => m.id === id) : null;
+    const text = moved ? `renamed from ${qualOf(moved.note) || moved.note}` : STATUS_WORD[st];
+    return html`<span class=${"badge st-" + st}>${text}</span>`;
+  }
+
+  function GhostCard({ id, onSelect }) {
+    const item = DIFF.removed.find((r) => "ghost:" + r.id === id);
+    const inside = DIFF.removed.filter((r) => r.path === item.path && r.id !== item.id);
+    return html`<div class="pad">
+      <div class="title"><h2>${item.path.split("/").pop()}</h2><span class="badge st-removed">deleted</span></div>
+      <div class="loc mono">${item.path}</div>
+      <p class="hint" style="margin-top:10px">This file existed in ${DIFF.base} and is gone in ${DIFF.head}.</p>
+      ${inside.length > 0 && html`<${Block} title="What it contained" count=${inside.length}>
+        <ul class="list">${inside.map((r) => html`<li><div class="row" style="cursor:default"><span class="ic d">×</span><span class="name">${qualOf(r.id)}</span></div></li>`)}</ul>
+      </${Block}>`}
+    </div>`;
+  }
+
+  // The panel shown in diff mode before anything is selected.
+  function ChangesPanel({ onSelect }) {
+    const d = DIFF;
+    const breaking = d.signature_changes.filter((c) => c.callers.length && c.breaking !== false);
+    const attention =
+      d.broken.length + d.new_cycles.length + breaking.length + d.duplicates.length + d.lost_callers.length + d.new_packages.length;
+    const files = new Map(); // module id -> { file: what happened to the file, parts: [...] }
+    const entry = (mod) => files.get(mod) || files.set(mod, { file: null, parts: [] }).get(mod);
+    for (const status of ["added", "changed", "moved"])
+      for (const item of d[status]) {
+        const mod = moduleIdOf(item.id) || item.id;
+        if (!nodes.has(mod)) continue;
+        if (item.kind === "module") entry(mod).file = { added: "new file", moved: "renamed", changed: "changed" }[status];
+        else entry(mod).parts.push(`${status === "moved" ? "renamed" : status} ${qualOf(item.id)}`);
+      }
+    const broken = new Set(d.broken.map((i) => i.id));
+    for (const id of broken) entry(id);
+    const describe = (mod) => {
+      if (broken.has(mod)) return "no longer parses";
+      const { file, parts } = files.get(mod);
+      // "changed" adds nothing when the changed functions are named.
+      const words = [...(file && !(file === "changed" && parts.length) ? [file] : []), ...parts];
+      return words.slice(0, 2).join(", ") + (words.length > 2 ? ", …" : "");
+    };
+    const deleted = d.removed.filter((r) => r.kind === "module");
+    const order = [...files.keys()].sort((a, b) => isSidePath(nodes.get(a).path) - isSidePath(nodes.get(b).path) || nodes.get(a).path.localeCompare(nodes.get(b).path));
+    return html`<div class="pad welcome">
+      <h2>What changed</h2>
+      <p class="mono" style="font-size:12.5px">${d.base} → ${d.head}</p>
+      <p>Coloured boxes changed: <b style="color:var(--add)">+ added</b>, <b style="color:var(--chg)">~ changed</b>, <b style="color:var(--mov)">→ renamed</b>, <b style="color:var(--danger)">× deleted</b>. Unchanged files are faded.</p>
+      ${attention > 0 && html`<${Block} title="Needs a look" count=${attention}>
+        <ul class="list">
+          ${d.broken.map((i) => html`<${Row} id=${i.id} name=${i.path} meta="no longer parses" onSelect=${onSelect} />`)}
+          ${d.new_cycles.map((c) => html`<${Row} id=${c[0]} kind="module" name=${c.map((m) => (nodes.get(m) || {}).name || m).join(" ↔ ")} meta="new import cycle" onSelect=${onSelect} />`)}
+          ${breaking.map((c) => html`<${Row} id=${c.id} name=${qualOf(c.id)} meta=${`signature changed · ${c.callers.length} caller(s) not updated`} onSelect=${onSelect} />`)}
+          ${d.duplicates.map((g) => html`<${Row} id=${g.new[0]} name=${qualOf(g.new[0])} meta=${`same logic as ${g.members.filter((m) => !g.new.includes(m.id)).map((m) => qualOf(m.id)).join(", ") || "another new function"}`} onSelect=${onSelect} />`)}
+          ${d.lost_callers.map((i) => html`<${Row} id=${i.id} name=${qualOf(i.id)} meta="lost all its callers" onSelect=${onSelect} />`)}
+          ${d.new_packages.map((pkg) => html`<li><div class="row" style="cursor:default"><span class="ic d">E</span><span class="name">${pkg.name}</span><span class="meta">new package</span></div></li>`)}
+        </ul>
+      </${Block}>`}
+      <${Block} title="Files" count=${order.length + deleted.length} hint=${order.length + deleted.length ? null : "No Python files changed."}>
+        <ul class="list">
+          ${order.map((m) => html`<${Row} id=${m} name=${nodes.get(m).path} meta=${describe(m)} onSelect=${onSelect} />`)}
+          ${deleted.map((r) => html`<${Row} id=${"ghost:" + r.id} kind="module" name=${r.path} meta="deleted" onSelect=${onSelect} />`)}
+        </ul>
+      </${Block}>
+      ${d.impacted.length > 0 && html`<p class="hint" style="margin-top:14px">${plural(d.impacted.length, "other file")} import the changed files.</p>`}
+    </div>`;
+  }
 
   function Welcome({ onSelect }) {
     const [showAll, setShowAll] = useState(false);
@@ -1079,7 +1219,16 @@
             <button class="btn" onClick=${() => setExpanded(new Set())}>Collapse all</button>
           </div>
           ${busy && html`<div class="busy">Arranging…</div>`}
-          <div class="legend" aria-label="Legend">
+          ${DIFF
+            ? html`<div class="legend" aria-label="Legend">
+                <span><i class="sw st-added"></i>+ Added</span>
+                <span><i class="sw st-changed"></i>~ Changed</span>
+                <span><i class="sw st-moved"></i>→ Renamed</span>
+                <span><i class="sw st-removed"></i>× Deleted</span>
+                <span><i class="sw" style="opacity:.4"></i>Unchanged</span>
+              </div>`
+            : null}
+          <div class="legend" aria-label="Legend" hidden=${!!DIFF}>
             <span><i class="sw"></i>Python file</span>
             <span><i class="sw folder"></i>Folder (double-click)</span>
             <span><i class="sw entry"></i>Entry point</span>
@@ -1089,7 +1238,8 @@
           </div>
         </div>
         <aside class="inspector" ref=${inspector} aria-label="Details">
-          ${!selected && html`<${Welcome} onSelect=${onListSelect} />`}
+          ${!selected && (DIFF ? html`<${ChangesPanel} onSelect=${onListSelect} />` : html`<${Welcome} onSelect=${onListSelect} />`)}
+          ${selected && selected.startsWith("ghost:") && html`<${GhostCard} id=${selected} onSelect=${onListSelect} />`}
           ${kind === "module" && html`<${ModuleCard} id=${selected} onSelect=${onListSelect} onCode=${(p, l, e) => setCode({ path: p, line: l, end: e })} onCenter=${center} />`}
           ${SYMBOL.has(kind) && html`<${SymbolCard} id=${selected} onSelect=${onListSelect} onCode=${(p, l, e) => setCode({ path: p, line: l, end: e })} onCenter=${center} />`}
           ${kind === "directory" && html`<${FolderCard} id=${selected} expanded=${expanded} onSelect=${onListSelect} onToggle=${toggle} onCenter=${center} />`}

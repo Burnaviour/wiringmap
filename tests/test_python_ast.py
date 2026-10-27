@@ -181,3 +181,67 @@ def test_python_314_unparenthesized_except_star_is_accepted():
     )
     assert info.error is None
     assert {c.parts for c in info.functions["load"].calls} == {("fetch",), ("give_up",)}
+
+
+# Fingerprints --------------------------------------------------------------------------
+
+PRICE = """
+def total(items, tax):
+    \"\"\"Sum the items.\"\"\"
+    subtotal = sum(i.price for i in items)
+    if subtotal > 100:
+        subtotal = subtotal * 0.9
+    return round(subtotal * (1 + tax), 2)
+"""
+
+
+def fn(source: str, name: str):
+    return extract(source).functions[name]
+
+
+def test_moving_a_function_or_editing_its_docstring_keeps_its_hash():
+    moved = "\n\n\n# a comment\n" + PRICE.replace("Sum the items.", "Add everything up.")
+    assert fn(PRICE, "total").code_hash == fn(moved, "total").code_hash
+
+
+def test_editing_code_changes_the_hash():
+    edited = PRICE.replace("0.9", "0.8")
+    assert fn(PRICE, "total").code_hash != fn(edited, "total").code_hash
+
+
+def test_renamed_copy_has_the_same_shape_but_not_the_same_hash():
+    copy = (
+        PRICE.replace("def total", "def compute_sum")
+        .replace("subtotal", "acc")
+        .replace("items", "rows")
+        .replace("tax", "rate")
+    )
+    a, b = fn(PRICE, "total"), fn(copy, "compute_sum")
+    assert a.shape_hash is not None
+    assert a.shape_hash == b.shape_hash
+    assert a.code_hash != b.code_hash
+
+
+def test_calling_a_different_function_is_a_different_shape():
+    other = PRICE.replace("round(", "truncate(")
+    assert fn(PRICE, "total").shape_hash != fn(other, "total").shape_hash
+
+
+def test_tiny_functions_get_no_shape():
+    assert fn("def get(self):\n    return self.x\n", "get").shape_hash is None
+
+
+def test_class_hash_follows_its_methods():
+    before = "class A:\n    def f(self):\n        return 1\n"
+    after = before.replace("return 1", "return 2")
+    assert extract(before).classes["A"].code_hash != extract(after).classes["A"].code_hash
+
+
+def test_file_hash_ignores_line_endings():
+    assert extract("x = 1\ny = 2\n").code_hash == extract("x = 1\r\ny = 2\r\n").code_hash
+    assert extract("x = 1\n").code_hash != extract("x = 2\n").code_hash
+
+
+def test_broken_file_still_gets_a_file_hash():
+    info = extract("def broken(:\n")
+    assert info.error and info.code_hash
