@@ -17,7 +17,7 @@ def test_checkout_holds_the_committed_version_not_the_working_tree(git_repo):
     with checkout(loc, resolve(loc, "HEAD")) as root:
         assert root.name == "project"
         assert files_in(root) == ["app.py", "lib/util.py"]
-        assert (root / "app.py").read_text() == "x = 1\n"
+        assert (root / "app.py").read_text(encoding="utf-8") == "x = 1\n"
     assert resolve(loc, "HEAD") == first
     assert not root.exists()  # cleaned up afterwards
 

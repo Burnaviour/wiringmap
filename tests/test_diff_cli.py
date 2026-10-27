@@ -79,9 +79,9 @@ def test_writes_markdown_json_and_html_files(git_repo, tmp_path):
     for name in ("d.md", "d.json", "d.html"):
         result = run(git_repo.root, "-q", "-o", tmp_path / name)
         assert result.exit_code == 0, result.output
-    assert "changed `total`" in (tmp_path / "d.md").read_text()
-    assert json.loads((tmp_path / "d.json").read_text())["changed"]
-    page = (tmp_path / "d.html").read_text()
+    assert "changed `total`" in (tmp_path / "d.md").read_text(encoding="utf-8")
+    assert json.loads((tmp_path / "d.json").read_text(encoding="utf-8"))["changed"]
+    page = (tmp_path / "d.html").read_text(encoding="utf-8")
     assert '"diff":{' in page and "shop.cart:total" in page
 
 
@@ -117,3 +117,19 @@ def test_conflicting_options_are_rejected(git_repo):
     assert run(git_repo.root, "--json", "--markdown").exit_code == 2
     result = run(git_repo.root, "-o", "diff.txt")
     assert result.exit_code == 2 and ".html, .md or .json" in said(result)
+
+
+def test_markdown_survives_a_non_utf8_terminal(git_repo, monkeypatch):
+    # Windows with output redirected to a file: the default code page is cp1252.
+    import io
+    import sys
+
+    from wiringmap.cli import _utf8_output
+
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", stream)
+    _utf8_output()
+    print("old → new ├─ …", file=sys.stdout)
+    sys.stdout.flush()
+    assert raw.getvalue().decode("utf-8").strip() == "old → new ├─ …"

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 import webbrowser
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Annotated
 
@@ -55,6 +56,18 @@ def main(
     ] = False,
 ) -> None:
     """wiringmap turns a repository into an interactive map of its files, classes and functions."""
+    _utf8_output()
+
+
+def _utf8_output() -> None:
+    """Write UTF-8 even when output is redirected on Windows, where the default code page
+    cannot encode the arrows and tree lines in reports (``wiringmap diff --markdown > x.md``)."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            # Some streams cannot change encoding mid-way; leave those as they are.
+            with suppress(ValueError, OSError):
+                stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 @app.command()
