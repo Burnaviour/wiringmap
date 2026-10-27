@@ -10,11 +10,17 @@
   not updated, copied logic, functions that lost all their callers and new third-party
   packages, and lists every change file by file. Output as a terminal summary,
   Markdown, JSON, or on the map (`--open`).
+- `wiringmap flow NAME`: follow a function step by step, in the order its calls happen,
+  or with `--up`, see what calls it back to where the program starts. Names can be
+  written the way Python does (`crud.create_user`). In the report, **Show flow** draws
+  it as a graph you expand by double-clicking.
 - The graph records a `hash` and a `shape` fingerprint for code, and the names of calls
   it could not link.
 
 ### Fixed
 
+- Output is written as UTF-8 everywhere, so redirecting a report to a file on Windows
+  (`wiringmap diff --markdown > changes.md`) no longer fails.
 - Running wiringmap in a folder without Python files now explains what happened
   instead of writing an empty map.
 

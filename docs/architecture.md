@@ -72,6 +72,18 @@ on a missing link. For example, a function is only reported as having "lost all 
 callers" when no unlinked call anywhere in the project has its name. Classes and
 functions inside a file that does not parse are treated as unknown, not as removed.
 
+## Following a function: `wiringmap flow`
+
+`flow.py` walks the call edges from one function, down (what it calls, ordered by the
+line of each call) or up (what calls it). A function appears once; later mentions
+point back to it, and recursion is marked instead of followed. Depth, a per-step limit
+and a total budget keep the result readable, and the counts of what was left out are
+reported. When more than three callers are in tests, examples or docs, they are folded
+into one line so the app callers stay visible.
+
+The report's flow view (`buildFlowView` in `app.js`) builds the same structure in the
+browser and places it in columns, one per step, so it reads left to right.
+
 ## The viewer
 
 `render/static/` holds the template (`report.html`), styles (`app.css`) and the app
