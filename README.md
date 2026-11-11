@@ -41,7 +41,9 @@ folder ignores itself, so it is never committed by accident.
 
 - **A map of the whole project.** Files are boxes inside their folders, and arrows show
   imports. Switch to **Calls** to see which files call into which; thicker arrows mean
-  more calls. Large projects start with folders closed (double-click to open one), and
+  more calls. Calls start in a **Top down** layout (callers above callees).
+  Switch between **Free** and **Top down** for either view. Cyclic dependencies
+  share a layer since no ordering can make every edge in a cycle point down. Large projects start with folders closed (double-click to open one), and
   tests, docs and migrations stay closed so you see the application first.
 - **Hide noisy connections** from a file, folder, or external package using its details panel.
   The node remains visible, and its arrows disappear in both Imports and Calls views.
