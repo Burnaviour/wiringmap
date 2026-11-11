@@ -150,7 +150,14 @@
 
   // The map: which boxes are visible ------------------------------------------------
 
-  function buildView(expanded, mode, showExternal) {
+  function buildView(expanded, mode, showExternal, mutedNodes) {
+    // Suppress individual module relationships *before* folding them into folder edges.
+    // This preserves unrelated arrows when a folder contains both muted and active files.
+    const mutedModules = new Set();
+    for (const id of mutedNodes) {
+      if (isDir(id)) forEachModule(id, (moduleId) => mutedModules.add(moduleId));
+      else if (kindOf(id) === "module") mutedModules.add(id);
+    }
     const elements = [];
     const rep = new Map(); // module id -> id of the box that currently stands for it
 
@@ -162,7 +169,7 @@
       rep.set(id, id);
       elements.push({
         group: "nodes",
-        data: { id, parent, label, kind: "module", entry, st, dim: !!DIFF && !st, error: !!(n.attrs && n.attrs.parse_error), w: labelWidth(label) },
+        data: { id, parent, label, kind: "module", entry, st, dim: !!DIFF && !st, muted: mutedModules.has(id), error: !!(n.attrs && n.attrs.parse_error), w: labelWidth(label) },
       });
     }
 
@@ -175,8 +182,9 @@
 
     function addDir(dirId, parent) {
       const { id, label } = compact(dirId);
+      const muted = mutedNodes.has(id) || ancestorsOf(id).some((a) => mutedNodes.has(a));
       if (expanded.has(id)) {
-        elements.push({ group: "nodes", data: { id, parent, label: label + "/", kind: "group" } });
+        elements.push({ group: "nodes", data: { id, parent, label: label + "/", kind: "group", muted } });
         for (const k of displayKids(id)) (isDir(k) ? addDir : addModule)(k, id);
         addGhosts(id, id);
         return;
@@ -184,7 +192,7 @@
       const count = pyCount.get(id);
       const changes = changesUnder.get(id) || 0;
       const text = `${label}/\n${plural(count, "module")}${changes ? ` · ${changes} changed` : ""}`;
-      elements.push({ group: "nodes", data: { id, parent, label: text, kind: "folder", chg: changes > 0, dim: !!DIFF && !changes, w: labelWidth(text) } });
+      elements.push({ group: "nodes", data: { id, parent, label: text, kind: "folder", chg: changes > 0, dim: !!DIFF && !changes, muted, w: labelWidth(text) } });
       forEachModule(id, (m) => rep.set(m, id));
     }
 
@@ -204,10 +212,14 @@
     if (mode === "imports") {
       for (const [src, list] of out.imports)
         for (const e of list)
-          if (kindOf(e.target) === "module") link(rep.get(src), rep.get(e.target), !!(e.attrs && e.attrs.type_only));
+          if (kindOf(e.target) === "module" && !mutedModules.has(src) && !mutedModules.has(e.target))
+            link(rep.get(src), rep.get(e.target), !!(e.attrs && e.attrs.type_only));
     } else {
       for (const [src, list] of out.calls)
-        for (const e of list) link(rep.get(moduleOf(src)), rep.get(moduleOf(e.target)), false);
+        for (const e of list) {
+          const source = moduleOf(src), target = moduleOf(e.target);
+          if (!mutedModules.has(source) && !mutedModules.has(target)) link(rep.get(source), rep.get(target), false);
+        }
     }
 
     if (showExternal) {
@@ -216,13 +228,14 @@
         for (const e of list) {
           const target = nodes.get(e.target);
           if (target && target.kind === "external" && !(target.attrs && target.attrs.stdlib) && rep.get(src)) {
-            link(rep.get(src), e.target, !!(e.attrs && e.attrs.type_only));
+            if (!mutedModules.has(src) && !mutedNodes.has(e.target))
+              link(rep.get(src), e.target, !!(e.attrs && e.attrs.type_only));
             used.add(e.target);
           }
         }
       for (const id of used) {
         const name = nodes.get(id).name;
-        elements.push({ group: "nodes", data: { id, label: name, kind: "external", w: labelWidth(name) } });
+        elements.push({ group: "nodes", data: { id, label: name, kind: "external", muted: mutedNodes.has(id), w: labelWidth(name) } });
       }
     }
 
@@ -330,6 +343,7 @@
       { selector: "node[st = 'removed']", style: { "background-opacity": 0, "border-color": c("--danger"), "border-style": "dashed", color: c("--danger") } },
       { selector: "node[?chg]", style: { "border-color": c("--chg"), "border-width": 1.5 } },
       { selector: "node[?dim]", style: { opacity: 0.4 } },
+      { selector: "node[?muted]", style: { "border-style": "dotted", "border-width": 2, "border-color": c("--faint") } },
       {
         selector: "edge",
         style: {
@@ -528,6 +542,8 @@
         cy.batch(() => {
           cy.edges().remove();
           cy.add(view.elements.filter((e) => e.group === "edges"));
+          const shown = new Map(view.elements.filter((e) => e.group === "nodes").map((e) => [e.data.id, e.data]));
+          cy.nodes().forEach((n) => n.data("muted", !!shown.get(n.id())?.muted));
         });
         return;
       }
@@ -736,6 +752,17 @@
     </section>`;
   }
 
+  function EdgeToggle({ id, mutedNodes, onToggleMuted }) {
+    const target = isDir(id) ? compact(id).id : id;
+    const inherited = ancestorsOf(target).some((a) => mutedNodes.has(a));
+    const hidden = mutedNodes.has(target);
+    return html`<button class="btn" disabled=${inherited}
+      title=${inherited ? "Connections are hidden by a parent folder" : "Toggle this node's arrows without hiding the node"}
+      onClick=${() => onToggleMuted(target)}>
+      ${inherited ? "Hidden by parent folder" : hidden ? "Show connections" : "Hide connections"}
+    </button>`;
+  }
+
   function Crumbs({ id, onSelect }) {
     const dirs = dirsAbove(id).reverse();
     const mod = moduleOf(id);
@@ -777,7 +804,7 @@
     </${Block}>`;
   }
 
-  function ModuleCard({ id, onSelect, onCode, onCenter }) {
+  function ModuleCard({ id, onSelect, onCode, onCenter, mutedNodes, onToggleMuted }) {
     const n = nodes.get(id);
     const a = n.attrs || {};
     const uses = (out.imports.get(id) || []).filter((e) => kindOf(e.target) === "module");
@@ -805,6 +832,7 @@
       <div class="actions">
         ${SOURCES[n.path] !== undefined && html`<button class="btn" onClick=${() => onCode(n.path, 1, 0)}>View source</button>`}
         <button class="btn" onClick=${onCenter}>Show on map</button>
+        <${EdgeToggle} id=${id} mutedNodes=${mutedNodes} onToggleMuted=${onToggleMuted} />
       </div>
       <${Block} title="Uses" count=${uses.length} dot="out" hint=${uses.length ? null : "Imports no other file in this project."}>
         <ul class="list">${uses.map((e) => html`<${Row} id=${e.target} name=${moduleLabel(e.target)} meta=${e.attrs && e.attrs.type_only ? "types only" : ""} onSelect=${onSelect} />`)}</ul>
@@ -890,7 +918,7 @@
     </div>`;
   }
 
-  function FolderCard({ id, expanded, onSelect, onToggle, onCenter }) {
+  function FolderCard({ id, expanded, onSelect, onToggle, onCenter, mutedNodes, onToggleMuted }) {
     const n = nodes.get(id);
     const list = displayKids(id);
     const open = expanded.has(compact(id).id);
@@ -908,6 +936,7 @@
       <div class="actions">
         <button class="btn" onClick=${() => onToggle(compact(id).id)}>${open ? "Collapse on map" : "Open on map"}</button>
         <button class="btn" onClick=${onCenter}>Show on map</button>
+        <${EdgeToggle} id=${id} mutedNodes=${mutedNodes} onToggleMuted=${onToggleMuted} />
       </div>
       <${Block} title="Inside" count=${list.length}>
         <ul class="list">${list.map((k) =>
@@ -917,11 +946,12 @@
     </div>`;
   }
 
-  function ExternalCard({ id, onSelect }) {
+  function ExternalCard({ id, onSelect, mutedNodes, onToggleMuted }) {
     const n = nodes.get(id);
     const users = (inn.imports.get(id) || []).map((e) => e.source);
     return html`<div class="pad">
       <div class="title"><h2>${n.name}</h2><span class="badge kind">${n.attrs && n.attrs.stdlib ? "standard library" : "external package"}</span></div>
+      <div class="actions"><${EdgeToggle} id=${id} mutedNodes=${mutedNodes} onToggleMuted=${onToggleMuted} /></div>
       <${Block} title="Imported by" count=${users.length}>
         <ul class="list">${users.map((u) => html`<${Row} id=${u} name=${moduleLabel(u)} onSelect=${onSelect} />`)}</ul>
       </${Block}>
@@ -1055,6 +1085,7 @@
       <ol>
         <li><b>Boxes are Python files.</b> Dashed boxes are folders: double-click one to open it.</li>
         <li><b>Arrows point to what a file imports.</b> Switch to “Calls” to see which files call into which.</li>
+        <li><b>Hide connections</b> in a file or folder’s details to remove its arrows without removing the node.</li>
         <li><b>Click a file</b> to see what it <span style="color:var(--accent-text)">uses</span> and what <span style="color:var(--usedby)">uses it</span>, and what is inside.</li>
         <li><b>Press /</b> to search any file, class or function.</li>
       </ol>
@@ -1110,6 +1141,7 @@
     const [expanded, setExpanded] = useState(initialExpanded);
     const [mode, setMode] = useState("imports");
     const [showExternal, setShowExternal] = useState(false);
+    const [mutedNodes, setMutedNodes] = useState(() => new Set());
     const [selected, setSelected] = useState(null);
     const [code, setCode] = useState(null);
     const [theme, setTheme] = useState(loadTheme);
@@ -1127,7 +1159,7 @@
       } catch (e) {}
     }, [theme]);
 
-    const view = useMemo(() => buildView(expanded, mode, showExternal), [expanded, mode, showExternal]);
+    const view = useMemo(() => buildView(expanded, mode, showExternal, mutedNodes), [expanded, mode, showExternal, mutedNodes]);
 
     const focus = useMemo(() => {
       if (!selected) return null;
@@ -1167,6 +1199,15 @@
       });
     }, []);
 
+    const toggleMuted = useCallback((id) => {
+      setMutedNodes((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    }, []);
+
     const kind = selected && kindOf(selected);
     const center = () => setCenterTick((t) => t + 1);
     const stats = G.stats || { nodes: {}, edges: {} };
@@ -1189,6 +1230,7 @@
             <button aria-pressed=${mode === "imports"} onClick=${() => setMode("imports")}>Imports</button>
             <button aria-pressed=${mode === "calls"} onClick=${() => setMode("calls")}>Calls</button>
           </div>
+          ${mutedNodes.size > 0 && html`<button class="btn" title="Restore all hidden arrows" onClick=${() => setMutedNodes(new Set())}>Show all connections (${mutedNodes.size})</button>`}
           <label class="check"><input type="checkbox" checked=${showExternal} onChange=${(e) => setShowExternal(e.target.checked)} /> Packages</label>
           <button class="btn icon" title=${"Theme: " + theme} aria-label=${"Theme: " + theme} onClick=${() => setTheme(THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length])}>
             ${theme === "dark"
@@ -1240,10 +1282,10 @@
         <aside class="inspector" ref=${inspector} aria-label="Details">
           ${!selected && (DIFF ? html`<${ChangesPanel} onSelect=${onListSelect} />` : html`<${Welcome} onSelect=${onListSelect} />`)}
           ${selected && selected.startsWith("ghost:") && html`<${GhostCard} id=${selected} onSelect=${onListSelect} />`}
-          ${kind === "module" && html`<${ModuleCard} id=${selected} onSelect=${onListSelect} onCode=${(p, l, e) => setCode({ path: p, line: l, end: e })} onCenter=${center} />`}
+          ${kind === "module" && html`<${ModuleCard} id=${selected} onSelect=${onListSelect} onCode=${(p, l, e) => setCode({ path: p, line: l, end: e })} onCenter=${center} mutedNodes=${mutedNodes} onToggleMuted=${toggleMuted} />`}
           ${SYMBOL.has(kind) && html`<${SymbolCard} id=${selected} onSelect=${onListSelect} onCode=${(p, l, e) => setCode({ path: p, line: l, end: e })} onCenter=${center} />`}
-          ${kind === "directory" && html`<${FolderCard} id=${selected} expanded=${expanded} onSelect=${onListSelect} onToggle=${toggle} onCenter=${center} />`}
-          ${kind === "external" && html`<${ExternalCard} id=${selected} onSelect=${onListSelect} />`}
+          ${kind === "directory" && html`<${FolderCard} id=${selected} expanded=${expanded} onSelect=${onListSelect} onToggle=${toggle} onCenter=${center} mutedNodes=${mutedNodes} onToggleMuted=${toggleMuted} />`}
+          ${kind === "external" && html`<${ExternalCard} id=${selected} onSelect=${onListSelect} mutedNodes=${mutedNodes} onToggleMuted=${toggleMuted} />`}
           ${code && html`<${CodePanel} ...${code} onClose=${() => setCode(null)} />`}
         </aside>
       </div>
