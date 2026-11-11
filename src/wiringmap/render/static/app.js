@@ -391,10 +391,136 @@
     };
   }
 
-  // Lay out the map, put unconnected pieces side by side in rows, then glide there.
-  function arrange(cy, randomize, done) {
+
+  // Return a top-down rank for each node. Strongly connected cycles share a row.
+  function layerRanks(ids, edges) {
+    const adj = new Map(ids.map((id) => [id, new Set()]));
+    for (const [src, dst] of edges) if (src !== dst && adj.has(src) && adj.has(dst)) adj.get(src).add(dst);
+    const index = new Map(), low = new Map(), stack = [], active = new Set(), groups = [];
+    let counter = 0;
+    function visit(id) {
+      index.set(id, counter);
+      low.set(id, counter++);
+      stack.push(id);
+      active.add(id);
+      for (const target of adj.get(id)) {
+        if (!index.has(target)) {
+          visit(target);
+          low.set(id, Math.min(low.get(id), low.get(target)));
+        } else if (active.has(target)) {
+          low.set(id, Math.min(low.get(id), index.get(target)));
+        }
+      }
+      if (low.get(id) === index.get(id)) {
+        const members = [];
+        let popped;
+        do {
+          popped = stack.pop();
+          active.delete(popped);
+          members.push(popped);
+        } while (popped !== id);
+        groups.push(members);
+      }
+    }
+    for (const id of ids) if (!index.has(id)) visit(id);
+    const owner = new Map();
+    groups.forEach((group, i) => group.forEach((id) => owner.set(id, i)));
+    const outgoing = groups.map(() => new Set()), indegree = groups.map(() => 0);
+    for (const [src, destinations] of adj) for (const dst of destinations) {
+      const a = owner.get(src), b = owner.get(dst);
+      if (a !== b && !outgoing[a].has(b)) {
+        outgoing[a].add(b);
+        indegree[b]++;
+      }
+    }
+    const ranks = groups.map(() => 0);
+    const queue = indegree.map((n, i) => n === 0 ? i : -1).filter((n) => n >= 0);
+    for (let i = 0; i < queue.length; i++) {
+      const group = queue[i];
+      for (const target of outgoing[group]) {
+        ranks[target] = Math.max(ranks[target], ranks[group] + 1);
+        if (--indegree[target] === 0) queue.push(target);
+      }
+    }
+    return new Map(ids.map((id) => [id, ranks[owner.get(id)]]));
+  }
+
+  // Recursively layer direct children of each expanded folder and treat each
+  // expanded folder as a single block in its parent. Only leaves need positions:
+  // Cytoscape computes compound group bounds from their children.
+  function layeredPositions(cy) {
+    const links = cy.edges().map((e) => [e.source().id(), e.target().id()]);
+    const H_GAP = 52, V_GAP = 85;
+
+    function place(parent) {
+      const children = parent ? parent.children().toArray() : cy.nodes().orphans().toArray();
+      if (!children.length) return { width: 110, height: 32, positions: [] };
+      const items = children.map((n) => {
+        if (n.isParent()) return { id: n.id(), ...place(n) };
+        const width = Math.max(70, Number(n.data("w")) || 110);
+        const height = n.data("kind") === "folder" ? 44 : 32;
+        return { id: n.id(), width, height, positions: [{ id: n.id(), x: width / 2, y: height / 2 }] };
+      });
+      const owner = new Map();
+      for (const item of items) for (const pos of item.positions) owner.set(pos.id, item.id);
+      const edges = [];
+      for (const [src, dst] of links) {
+        const a = owner.get(src), b = owner.get(dst);
+        if (a && b && a !== b) edges.push([a, b]);
+      }
+      const ranks = layerRanks(items.map((item) => item.id), edges);
+      const levels = new Map();
+      for (const item of items) {
+        const rank = ranks.get(item.id);
+        if (!levels.has(rank)) levels.set(rank, []);
+        levels.get(rank).push(item);
+      }
+      const rows = [...levels].sort((a, b) => a[0] - b[0]).map(([, row]) =>
+        row.sort((a, b) => a.id.localeCompare(b.id)));
+      const rowWidth = (row) => row.reduce((sum, item) => sum + item.width, 0) + H_GAP * (row.length - 1);
+      const contentWidth = Math.max(...rows.map(rowWidth));
+      const positions = [];
+      let y = 0;
+      for (const row of rows) {
+        const height = Math.max(...row.map((item) => item.height));
+        let x = (contentWidth - rowWidth(row)) / 2;
+        for (const item of row) {
+          const top = y + (height - item.height) / 2;
+          for (const pos of item.positions)
+            positions.push({ id: pos.id, x: x + pos.x, y: top + pos.y });
+          x += item.width + H_GAP;
+        }
+        y += height + V_GAP;
+      }
+      const contentHeight = y - V_GAP;
+      if (!parent) return { width: contentWidth, height: contentHeight, positions };
+      const width = Math.max(contentWidth + 40, (parent.data("label") || "").length * 7 + 40);
+      const dx = (width - contentWidth) / 2;
+      return {
+        width, height: contentHeight + 64,
+        positions: positions.map((p) => ({ id: p.id, x: p.x + dx, y: p.y + 42 })),
+      };
+    }
+    return new Map(place(null).positions.map((p) => [p.id, { x: p.x, y: p.y }]));
+  }
+
+  // Lay out the map and glide to new positions.
+  function arrange(cy, randomize, done, layoutMode) {
     const leaves = cy.nodes().filter((n) => !n.isParent());
     const start = new Map(leaves.map((n) => [n.id(), { ...n.position() }]));
+    if (layoutMode === "layers") {
+      const targets = layeredPositions(cy);
+      leaves.forEach((n) => n.position(targets.get(n.id())));
+      const viewport = fittedViewport(cy);
+      if (randomize || leaves.length > 350) cy.viewport(viewport);
+      else {
+        leaves.forEach((n) => n.position(start.get(n.id())));
+        leaves.forEach((n) => n.animate({ position: targets.get(n.id()) }, { duration: 360, easing: "ease-in-out-cubic" }));
+        cy.animate(viewport, { duration: 360, easing: "ease-in-out-cubic" });
+      }
+      done();
+      return;
+    }
     const layout = cy.layout(layoutOptions(randomize, leaves.length));
     layout.one("layoutstop", () => {
       separate(cy);
@@ -496,10 +622,11 @@
     };
   }
 
-  function GraphView({ view, focus, centerTick, theme, fitTick, onSelect, onToggle, onBusy }) {
+  function GraphView({ view, focus, centerTick, theme, fitTick, layoutMode, onSelect, onToggle, onBusy }) {
     const box = useRef(null);
     const cyRef = useRef(null);
     const positions = useRef(new Map());
+    const previousLayout = useRef(null);
     const handlers = useRef({});
     handlers.current = { onSelect, onToggle };
 
@@ -538,6 +665,8 @@
         if (!n.isParent()) positions.current.set(n.id(), { ...n.position() });
       });
       const sameNodes = before.size === view.nodeIds.size && [...before].every((id) => view.nodeIds.has(id));
+      const layoutChanged = previousLayout.current !== layoutMode;
+      previousLayout.current = layoutMode;
       if (sameNodes) {
         cy.batch(() => {
           cy.edges().remove();
@@ -545,7 +674,10 @@
           const shown = new Map(view.elements.filter((e) => e.group === "nodes").map((e) => [e.data.id, e.data]));
           cy.nodes().forEach((n) => n.data("muted", !!shown.get(n.id())?.muted));
         });
-        return;
+        if (layoutMode !== "layers" && !layoutChanged) return;
+        onBusy(true);
+        const timer = setTimeout(() => arrange(cy, false, () => onBusy(false), layoutMode), 30);
+        return () => clearTimeout(timer);
       }
 
       const known = positions.current;
@@ -566,9 +698,9 @@
       onBusy(true);
       // A timer, not requestAnimationFrame: it lets "Arranging…" paint first, and it
       // still runs when the report was opened in a background tab.
-      const timer = setTimeout(() => arrange(cy, placed === 0, () => onBusy(false)), 30);
+      const timer = setTimeout(() => arrange(cy, placed === 0, () => onBusy(false), layoutMode), 30);
       return () => clearTimeout(timer);
-    }, [view]);
+    }, [view, layoutMode]);
 
     useEffect(() => {
       const cy = cyRef.current;
@@ -1084,7 +1216,7 @@
       <p>A map of how this code is wired, made by wiringmap ${G.generator.version}${when ? " on " + when : ""}.</p>
       <ol>
         <li><b>Boxes are Python files.</b> Dashed boxes are folders: double-click one to open it.</li>
-        <li><b>Arrows point to what a file imports.</b> Switch to “Calls” to see which files call into which.</li>
+        <li><b>Arrows point to what a file imports.</b> Switch to “Calls” for call relationships. Calls start in a top-down layout; select “Top down” for Imports too.</li>
         <li><b>Hide connections</b> in a file or folder’s details to remove its arrows without removing the node.</li>
         <li><b>Click a file</b> to see what it <span style="color:var(--accent-text)">uses</span> and what <span style="color:var(--usedby)">uses it</span>, and what is inside.</li>
         <li><b>Press /</b> to search any file, class or function.</li>
@@ -1140,6 +1272,8 @@
   function App() {
     const [expanded, setExpanded] = useState(initialExpanded);
     const [mode, setMode] = useState("imports");
+    const [layouts, setLayouts] = useState({ imports: "free", calls: "layers" });
+    const layoutMode = layouts[mode];
     const [showExternal, setShowExternal] = useState(false);
     const [mutedNodes, setMutedNodes] = useState(() => new Set());
     const [selected, setSelected] = useState(null);
@@ -1208,6 +1342,7 @@
       });
     }, []);
 
+    const setLayout = (value) => setLayouts((prev) => ({ ...prev, [mode]: value }));
     const kind = selected && kindOf(selected);
     const center = () => setCenterTick((t) => t + 1);
     const stats = G.stats || { nodes: {}, edges: {} };
@@ -1231,6 +1366,11 @@
             <button aria-pressed=${mode === "calls"} onClick=${() => setMode("calls")}>Calls</button>
           </div>
           ${mutedNodes.size > 0 && html`<button class="btn" title="Restore all hidden arrows" onClick=${() => setMutedNodes(new Set())}>Show all connections (${mutedNodes.size})</button>`}
+          <div class="seg" role="group" aria-label="Graph layout">
+            <button aria-pressed=${layoutMode === "free"} onClick=${() => setLayout("free")}>Free</button>
+            <button aria-pressed=${layoutMode === "layers"} onClick=${() => setLayout("layers")}
+              title="Callers above callees, importers above their imports">Top down</button>
+          </div>
           <label class="check"><input type="checkbox" checked=${showExternal} onChange=${(e) => setShowExternal(e.target.checked)} /> Packages</label>
           <button class="btn icon" title=${"Theme: " + theme} aria-label=${"Theme: " + theme} onClick=${() => setTheme(THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length])}>
             ${theme === "dark"
@@ -1250,6 +1390,7 @@
                 focus=${focus}
                 centerTick=${centerTick}
                 fitTick=${fitTick}
+                layoutMode=${layoutMode}
                 theme=${theme}
                 onSelect=${onMapSelect}
                 onToggle=${toggle}
