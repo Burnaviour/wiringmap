@@ -43,6 +43,9 @@ folder ignores itself, so it is never committed by accident.
   imports. Switch to **Calls** to see which files call into which; thicker arrows mean
   more calls. Large projects start with folders closed (double-click to open one), and
   tests, docs and migrations stay closed so you see the application first.
+- **Hide noisy connections** from a file, folder, or external package using its details panel.
+  The node remains visible, and its arrows disappear in both Imports and Calls views.
+  You can toggle multiple nodes and restore them with **Show all connections**.
 - **Click a file** to see what it uses (indigo), what uses it (amber), its docstring,
   and the classes and functions inside it.
 - **Click a function** to see what it calls and what calls it. Each link says how it
